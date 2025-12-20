@@ -792,7 +792,7 @@ class CharupanitRipplesDetectionMethod(RipplesDetection):
         peakVal = filtered_abs[(clean_peakTimes * self.fs).astype(int)]
 
         # valid peak times
-        alpha = 0.01
+        alpha = 0.065
         threshold, shape, loc, scale = self.iterative_threshold(peakVal, alpha=alpha)
         detections = peakVal > threshold
         conf = (peakVal - threshold) / scale
@@ -804,28 +804,42 @@ class CharupanitRipplesDetectionMethod(RipplesDetection):
         if N < nCycles:
             return pd.DataFrame()
 
-        # 1) window-level labeling: W[i] corresponds to peaks i..i+5
+        # 1) Identify windows that pass criterion
         W = np.zeros(N - nCycles + 1, dtype=bool)
         for i in range(N - nCycles + 1):
             W[i] = detections[i:i + nCycles].sum() >= npeakth
 
-        # 2) merge consecutive True windows into events
-        flag_w, _ = label(W)
+        # 2) Label consecutive True windows into events
+        flag_w, num_events = label(W)
 
         candidates = []
-        for zz in range(1, flag_w.max() + 1):
-            w_idx = np.where(flag_w == zz)[0]
+        for event_id in range(1, num_events + 1):
+            w_idx = np.where(flag_w == event_id)[0]
             if w_idx.size == 0:
                 continue
 
-            # window i spans peaks [i, i+5]
-            start_peak = w_idx[0]
-            end_peak = w_idx[-1] + (nCycles - 1)
+            # All peaks covered by these windows
+            first_window = w_idx[0]
+            last_window = w_idx[-1]
+
+            # Window i covers peaks [i, i+nCycles)
+            first_peak_in_event = first_window
+            last_peak_in_event = last_window + nCycles - 1
+
+            # Find first and last peak ABOVE THRESHOLD in this range
+            event_peaks = np.where(detections[first_peak_in_event:last_peak_in_event + 1])[0]
+
+            if len(event_peaks) == 0:
+                continue  # Shouldn't happen, but safety check
+
+            # Adjust indices to global peak array
+            start_peak_idx = first_peak_in_event + event_peaks[0]
+            end_peak_idx = first_peak_in_event + event_peaks[-1]
 
             candidates.append([
-                clean_peakTimes[start_peak],
-                clean_peakTimes[end_peak],
-                np.median(conf[start_peak:end_peak + 1])
+                clean_peakTimes[start_peak_idx],
+                clean_peakTimes[end_peak_idx],
+                np.median(conf[start_peak_idx:end_peak_idx + 1])
             ])
 
         if not candidates:
@@ -848,7 +862,7 @@ class CharupanitRipplesDetectionMethod(RipplesDetection):
         return ripples_df
 
 
-    def iterative_threshold(self, peakVal, alpha=0.01, n_iterations=16):
+    def iterative_threshold(self, peakVal, alpha=0.065, n_iterations=15):
         x = np.asarray(peakVal, dtype=float).copy()
         prev_th = None
         threshold = np.nan
@@ -1054,182 +1068,5 @@ def get_peak_index(filtered_data, data, start_idx):
     return peak_idx + start_idx
 
 
-# class RinatRipplesDetectionMethod(RipplesDetection):
-#     def __init__(self, all_patient_data, fs, start_of_section=0, verbose=True):
-#         super().__init__(verbose=verbose)
-#         self.all_patient_data = all_patient_data
-#         self.start_of_section = start_of_section
-#         self.fs = fs
-#         self.window_length_sec = 0.1  # 5
-#         self.window_size_samples = int(self.window_length_sec * self.fs)
-#         self.trail_length = self.all_patient_data.shape[1]
-#         # print n_trials
-#         self.n_trials = self.all_patient_data.shape[0]
-#         print(f"Number of trials: {self.n_trials}")
-#
-#     def ripple_detection(self):
-#         # filter the signal into ripple band
-#         ripple_band = [80, 170]
-#         filtered_hippo = self.filter_signal(self.all_patient_data, ripple_band, 101, 'hamming', self.fs)
-#         hilbert_hippo = np.abs(hilbert(filtered_hippo))
-#         z_score = self.z_score(hilbert_hippo)
-#
-#         # find peaks in the hilbert signal as candidate ripples
-#         trails_peaks = [find_peaks(z_score[i,:], height = 1, distance=self.window_size_samples)[0] for i in range(hilbert_hippo.shape[0])]
-#
-#         # extract the raw data window around the peak from the raw signal
-#         ripple_data = []
-#         X = []
-#         for trail_index, peaks in enumerate(trails_peaks):
-#             for peak in peaks:
-#                 if peak - self.window_size_samples // 2 < 0 or peak + self.window_size_samples // 2 > self.trail_length:
-#                     continue
-#                 start = peak - self.window_size_samples // 2
-#                 end = peak + self.window_size_samples // 2
-#                 ripple_data.append(self.all_patient_data[trail_index, start:end])
-#                 start_time = start / self.fs
-#                 end_time = end / self.fs
-#                 peak_time = peak / self.fs
-#                 X.append([trail_index, start_time, end_time, peak_time])
-#
-#         X = pd.DataFrame(X, columns=['trail', 'start', 'end', 'peak'])
-#         features = self.compute_wavelet_transform(ripple_data)
-#         # add features columns to the dataframe
-#         for i in range(len(features[0])):
-#             X[f'feature_{i}'] = [feature[i] for feature in features]
-#
-#         # K-means clustering
-#         all_cwt = np.array(features)
-#         scaler = StandardScaler()
-#         X_scaled = scaler.fit_transform(all_cwt)
-#         # corr_matrix = np.corrcoef(X_scaled, rowvar=False)
-#         # sns.heatmap(corr_matrix, cmap="coolwarm", center=0)
-#         # plt.title("Feature Correlation Heatmap")
-#         # plt.show()
-#
-#         # som_size = (5, 5)
-#         # som = MiniSom(x=som_size[0], y=som_size[1], input_len=X_scaled.shape[1], sigma=1.0, learning_rate=0.5)
-#         # som.random_weights_init(X_scaled)
-#         # som.train_random(X_scaled, 1000)
-#         # bmu_indexes = np.array([som.winner(x) for x in X_scaled])
-#         # bmu_labels = np.ravel_multi_index(np.array(bmu_indexes).T, som_size)
-#         # X['label'] = bmu_labels
-#
-#         # k-means
-#         db_scores = []
-#         for k in range(2, 9):
-#             kmeans = KMeans(n_clusters=k, random_state=42).fit(X_scaled)
-#             db_index = davies_bouldin_score(X_scaled, kmeans.labels_)
-#             db_scores.append(db_index)
-#             print(f"Clusters: {k}, Davies-Bouldin Score: {db_index:.3f}")
-#         # chosen number of clusters
-#         final_k = range(2, 10)[np.argmin(db_scores)]
-#         kmeans = KMeans(n_clusters=final_k, random_state=42).fit(X_scaled)
-#         X['label'] = kmeans.labels_
-#
-#         # bmu_labels = np.ravel_multi_index(np.array(bmu_indexes).T, (10, 10))
-#         # umatrix = som.distance_map()
-#         # plt.figure(figsize=(10, 10))
-#         # plt.imshow(umatrix, cmap='coolwarm', interpolation='nearest')
-#         # plt.colorbar(label="Distance between neurons")
-#         # plt.title("SOM U-Matrix (Cluster Visualization)")
-#         # plt.show()
-#         #
-#         # plt.figure(figsize=(8, 6))
-#         # plt.scatter(bmu_indexes[:, 0], bmu_indexes[:, 1], c=bmu_labels, cmap='viridis', alpha=0.7)
-#         # plt.colorbar(label="Cluster ID")
-#         # plt.title("SOM Cluster Assignments")
-#         # plt.xlabel("SOM X")
-#         # plt.ylabel("SOM Y")
-#         # plt.show()
-#
-#         # add SOM clusters to df
-#
-#
-#         # # Reduce n clusters using Davies-Bouldin Index and K-means
-#         # som_weights = som.get_weights().reshape(-1, X_scaled.shape[1])  # Flatten SOM grid
-#         # db_scores = []
-#         # for k in range(2, 9):
-#         #     kmeans = KMeans(n_clusters=k, random_state=42).fit(som_weights)
-#         #     db_index = davies_bouldin_score(som_weights, kmeans.labels_)
-#         #     db_scores.append(db_index)
-#         #     print(f"Clusters: {k}, Davies-Bouldin Score: {db_index:.3f}")
-#         # # chosen number of clusters
-#         # final_k = range(2, 10)[np.argmin(db_scores)]
-#         # kmeans = KMeans(n_clusters=final_k, random_state=42).fit(som_weights)
-#         # som_cluster_labels = kmeans.labels_
-#         #
-#         # bmu_flat_indexes = np.ravel_multi_index(np.array(bmu_indexes).T, som_size)  # Convert (x,y) to 1D index
-#         # data_clusters = som_cluster_labels[bmu_flat_indexes]  # Assign data points to clusters
-#         # # add labels to the dataframe
-#         # X['label'] = data_clusters
-#         # # drop cluster that has less than 1% of the data
-#         cluster_counts = X['label'].value_counts()
-#         print(cluster_counts)
-#
-#         final_k = len(X['label'].unique())
-#         RACM_LIST = []
-#         for cluster in range(final_k):
-#             cluster_data = X[X['label'] == cluster]
-#             cluster_start_end = cluster_data[['start', 'end']].values
-#             RACM = computeRippleActivityReliabilityMetric(cluster_start_end)
-#             # print(f"Cluster {cluster} RACM: {RACM:.3f}")
-#             RACM_LIST.append(RACM)
-#         print(f'maximal RACM: {np.max(RACM_LIST)} for cluster {np.argmax(RACM_LIST)} with {cluster_counts[np.argmax(RACM_LIST)]} events')
-#
-#
-#         f=4
-#
-#
-#
-#
-#
-#     def compute_wavelet_transform(self, ripple_data):
-#         # wavelet = 'cmor1.5-1.0'
-#         # f_min, f_max = 50, 250
-#         # frequencies = np.arange(f_min, f_max, 1) / self.fs  # normalize
-#         # scales = pywt.frequency2scale(wavelet, frequencies)
-#
-#         all_cwt = []
-#         for data in tqdm(ripple_data):
-#             # cwtmatr, freqs = pywt.cwt(data, scales, wavelet, 1/self.fs)
-#             # real_component = np.real(cwtmatr)
-#             # imag_component = np.imag(cwtmatr)
-#             # dummy_channel = np.zeros_like(real_component)
-#             # stacked_cwt = np.stack([real_component, imag_component, dummy_channel], axis=-1) #scaling? dummy is for network...
-#             # all_cwt.append(stacked_cwt)
-#             # plt.figure(figsize=(10, 6))
-#             # time = np.arange(0, len(data)) / self.fs
-#             # plt.imshow(np.abs(cwtmatr), extent=[time[0], time[-1], freqs[-1], freqs[0]], cmap='viridis', aspect='auto',
-#             #            interpolation='nearest')
-#             # plt.colorbar(label='Magnitude')
-#             # plt.xlabel('Time (seconds)')
-#             # plt.ylabel('Frequency (Hz)')
-#             # plt.title('Continuous Wavelet Transform (CWT) of EEG Data')
-#             # plt.show()
-#
-#             wavelet = 'db4'
-#             coeffs = pywt.wavedec(data, wavelet, level=5)
-#             selected_levels = [3, 4] # levels 3 and 4 for ripple band
-#             # wavelet_features = np.concatenate([coeffs[j] for j in selected_levels])
-#             wavelet_features = np.array([])
-#             for i in selected_levels:
-#                 wavelet_features = np.append(wavelet_features, np.sum(np.square(coeffs[i])))  # Wavelet Energy
-#                 wavelet_features = np.append(wavelet_features, -np.sum((coeffs[i] ** 2) * np.log(coeffs[i] ** 2 + 1e-10)))  # Entropy
-#                 wavelet_features = np.append(wavelet_features, np.std(coeffs[i]))  # Standard Deviation (Variation)
-#                 wavelet_features = np.append(wavelet_features, np.mean(np.abs(coeffs[i])))  # Mean Absolute Value
-#                 wavelet_features = np.append(wavelet_features, skew(coeffs[i]))  # Skewness
-#                 wavelet_features = np.append(wavelet_features, kurtosis(coeffs[i]))  # Kurtosis
-#                 wavelet_features = np.append(wavelet_features, np.ptp(coeffs[i]))  # Peak-to-Peak Amplitude
-#                 zero_crossings = np.sum(np.diff(np.sign(coeffs[i])) != 0)
-#                 wavelet_features = np.append(wavelet_features, zero_crossings)  # Zero Crossing Rate
-#             all_cwt.append(wavelet_features)
-#         return all_cwt
-#
-#
-#
-#
-#
-#
 
 

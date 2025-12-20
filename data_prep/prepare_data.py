@@ -4,7 +4,7 @@ import joblib
 import pandas as pd
 
 import numpy as np
-from prepare_data_utils import load_raw_and_set_montage, return_refrenced_scalp_elec, \
+from data_prep.prepare_data_utils import load_raw_and_set_montage, return_refrenced_scalp_elec, \
     save_figures, return_refrenced_hippo_elec, get_annotations, return_trails_as_epochs_object
 
 ################################ ds004752 dataset ################################
@@ -53,7 +53,7 @@ for patient in patients:
 
 
         if scalp_fs > 200:
-            raw_scalp.filter(l_freq=None, h_freq=100, verbose=False)
+            ref_scalp.filter(l_freq=None, h_freq=100, verbose=False)
 
 
 

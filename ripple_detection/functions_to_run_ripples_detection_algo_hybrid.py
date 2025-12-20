@@ -1,6 +1,6 @@
 import pandas as pd
 
-from new_files_with_order.ripples_detection_methods_hybrid import *
+from ripple_detection.ripples_detection_methods_hybrid import *
 from time import time
 import concurrent.futures
 import mne
@@ -9,9 +9,10 @@ mne.set_log_level('CRITICAL')
 
 def run_norman_method(patient, session, hippo_data_wm, hippo_data_bp, hippo_data_mastoids_bp, start_of_trails_WM, start_of_trails_BP, start_of_trails_BP_mas, hippo_elec_names_wm, hippo_elec_names_bp, hippo_elec_names_bp_mas):
     ######## Uncomment if want to run norman_bp! ########
-    hippo_data_wm = hippo_data_bp
-    start_of_trails_WM = start_of_trails_BP
-    hippo_elec_names_wm = hippo_elec_names_bp
+    # hippo_data_wm = hippo_data_bp
+    # start_of_trails_WM = start_of_trails_BP
+    # hippo_elec_names_wm = hippo_elec_names_bp
+
     trails_results = pd.DataFrame(columns=['patient', 'session', 'electrode', 'start', 'end', 'peak', 'confidence'])
     # start = time()
     ieeg_fs_500 = 500
