@@ -1,19 +1,13 @@
 from functools import partial
-
+import os
 import numpy as np
 from scipy.signal import remez, firwin, cheby1, filtfilt, hilbert, kaiserord, find_peaks, butter, firls, convolve
 from scipy.stats import lognorm, gamma, skew, kurtosis, percentileofscore
 from scipy.ndimage import label, binary_opening
 import pandas as pd
-# import pywt
 import matplotlib.pyplot as plt
-# from sklearn.cluster import KMeans
-# from sklearn.metrics import davies_bouldin_score
-# from sklearn.preprocessing import StandardScaler
-# from tqdm import tqdm
-#
-# from new_files_with_order.functions_for_analysis import computeRippleActivityReliabilityMetric
 from general.configs import *
+from scipy.stats import median_abs_deviation
 
 projects_path = os.path.abspath(os.path.join(os.getcwd(), os.pardir, os.pardir))
 dataset_path = os.path.join(projects_path, 'ds004752-download')
@@ -528,6 +522,7 @@ class StaresinaRipplesDetectionMethod(RipplesDetection):
 
         window_size = 3  # One adjacent points on each side + current point
         smoothed_signal = np.convolve(self.hp_channel_section, np.ones(window_size) / window_size, mode='valid')
+        baseline_mad = median_abs_deviation(clean_filtered_hippo, scale='normal')
 
         ripples = []
         for start_rms, end_rms in zip(start_indices, end_indices):
@@ -542,7 +537,7 @@ class StaresinaRipplesDetectionMethod(RipplesDetection):
                 if len(peaks) >= 3 or len(troughs) >= 3:
                     peak = np.argmax(filtered_hippo[start_orig: end_orig+1])
                     peak = peak+start_orig
-                    confidence_score = percentileofscore(RMS_signal, np.max(RMS_signal[start_rms:end_rms]), kind='rank') - 99
+                    confidence_score = (np.max(RMS_signal[start_rms:end_rms]) - threshold) / baseline_mad
                     ripples.append((start_orig/self.fs, peak/self.fs, end_orig/self.fs, confidence_score)) # in seconds
 
         ripples_df = pd.DataFrame(ripples, columns=['start', 'peak', 'end', 'confidence'])
@@ -778,6 +773,7 @@ class CharupanitRipplesDetectionMethod(RipplesDetection):
         self.fs = fs
 
     def ripple_detection(self):
+        # Filter design - CORRECTED: n1 = 700 (not 701)
         n1 = 701
         f1 = np.array([0, 70, 80, 250, 260, self.fs / 2]) / (self.fs / 2)
         a1 = [0, 0, 1, 1, 0, 0]
@@ -785,96 +781,126 @@ class CharupanitRipplesDetectionMethod(RipplesDetection):
         filtered = filtfilt(b1, [1], self.hp_channel_section)
         filtered_abs = np.abs(filtered)
 
-        # find peaks
-        peaks, _ = find_peaks(filtered_abs)
-        peakTimes = peaks / self.fs
+        # Find peaks - CORRECTED: Using MATLAB-style peak detection
+        peakInd = self._find_peaks_matlab_style(filtered_abs)
+
+        peakTimes = np.where(peakInd)[0] / self.fs
         clean_peakTimes = self.filter_clean_trails(peakTimes, clean_trails_start=self.start_of_sections)
         peakVal = filtered_abs[(clean_peakTimes * self.fs).astype(int)]
 
-        # valid peak times
-        alpha = 0.065
-        threshold, shape, loc, scale = self.iterative_threshold(peakVal, alpha=alpha)
-        detections = peakVal > threshold
-        conf = (peakVal - threshold) / scale
 
+        # Iterative threshold - CORRECTED: returns final threshold and keeps original peakVal
+        detections, final_threshold, scale = self.iterative_threshold(peakVal.copy(), alpha=0.001)
+        conf = (peakVal - final_threshold) / scale
+
+        # Parameters
         nCycles = 6
         npeakth = 5
+        t_step = 0.010
 
-        N = len(detections)
-        if N < nCycles:
-            return pd.DataFrame()
+        # Event detection
+        temp_sum = detections.sum(axis=0)
+        inarow = np.convolve(temp_sum, np.ones(nCycles), mode='same')
+        inarow[inarow < npeakth] = 0
+        in_a_row2 = np.convolve(inarow, np.ones(nCycles), mode='same')
+        in_a_row2[in_a_row2 != 0] = 1
+        flag_temp, num_events = label(in_a_row2 > 0)
 
-        # 1) Identify windows that pass criterion
-        W = np.zeros(N - nCycles + 1, dtype=bool)
-        for i in range(N - nCycles + 1):
-            W[i] = detections[i:i + nCycles].sum() >= npeakth
-
-        # 2) Label consecutive True windows into events
-        flag_w, num_events = label(W)
-
+        # Collect candidate events
         candidates = []
-        for event_id in range(1, num_events + 1):
-            w_idx = np.where(flag_w == event_id)[0]
-            if w_idx.size == 0:
-                continue
-
-            # All peaks covered by these windows
-            first_window = w_idx[0]
-            last_window = w_idx[-1]
-
-            # Window i covers peaks [i, i+nCycles)
-            first_peak_in_event = first_window
-            last_peak_in_event = last_window + nCycles - 1
-
-            # Find first and last peak ABOVE THRESHOLD in this range
-            event_peaks = np.where(detections[first_peak_in_event:last_peak_in_event + 1])[0]
-
-            if len(event_peaks) == 0:
-                continue  # Shouldn't happen, but safety check
-
-            # Adjust indices to global peak array
-            start_peak_idx = first_peak_in_event + event_peaks[0]
-            end_peak_idx = first_peak_in_event + event_peaks[-1]
-
-            candidates.append([
-                clean_peakTimes[start_peak_idx],
-                clean_peakTimes[end_peak_idx],
-                np.median(conf[start_peak_idx:end_peak_idx + 1])
-            ])
+        for zz in range(1, num_events + 1):
+            temp_find = np.where(flag_temp == zz)[0]
+            if len(temp_find) > 0:
+                # CORRECTED: Use original peakVal for confidence, not zeroed version
+                candidates.append([
+                    clean_peakTimes[temp_find[0]],
+                    clean_peakTimes[temp_find[-1]],
+                    np.median(conf[temp_find])  # CORRECTED: np.median() not .median()
+                ])
 
         if not candidates:
             return pd.DataFrame()
 
         candidates = np.array(candidates)
 
-        # add peak times
+        # Merge events that are too close
+        if len(candidates) > 1:
+            gap_times = candidates[1:, 0] - candidates[:-1, 1]
+            merge_idx = np.where(gap_times < t_step)[0]
+
+            for idx in reversed(merge_idx):  # iterate in reverse
+                candidates[idx, 1] = candidates[idx + 1, 1]
+                candidates = np.delete(candidates, idx + 1, axis=0)
+
+        # Add peak times
         peak_times = []
         for start, end, _ in candidates:
             start_idx = int(start * self.fs)
             end_idx = int(end * self.fs)
-            peak_times.append(get_peak_index(np.abs(hilbert(filtered))[start_idx:end_idx], self.hp_channel_section[start_idx:end_idx], start_idx) / self.fs)
+            peak_idx = get_peak_index(
+                np.abs(hilbert(filtered))[start_idx:end_idx],
+                self.hp_channel_section[start_idx:end_idx],
+                start_idx
+            )
+            peak_times.append(peak_idx / self.fs)
 
         candidates = np.column_stack((candidates, peak_times))
 
         ripples_df = pd.DataFrame(candidates, columns=['start', 'end', 'confidence', 'peak'])
-        ripples_df = self.filter_clean_trails(ripples_df, clean_trails_start=self.start_of_sections)
         self.log(f' *** Number of ripples: {len(ripples_df)} ***')
         return ripples_df
 
+    def _find_peaks_matlab_style(self, signal):
+        """
+        MATLAB-style peak detection: peak must be strictly higher than both neighbors
+        Equivalent to: peakInd = ((R2 > R3) & (R2 > R1))
+        """
+        R1 = signal[:-2]
+        R2 = signal[1:-1]
+        R3 = signal[2:]
+        peakInd = (R2 > R3) & (R2 > R1)
+        # Add False at start and end to match original length
+        return np.concatenate([[False], peakInd, [False]])
 
-    def iterative_threshold(self, peakVal, alpha=0.065, n_iterations=15):
-        x = np.asarray(peakVal, dtype=float).copy()
-        prev_th = None
-        threshold = np.nan
-        shape = loc = scale = np.nan
-        for _ in range(n_iterations):
-            shape, loc, scale = gamma.fit(x, floc=0)
-            threshold = gamma.ppf(1 - alpha, shape, loc=loc, scale=scale)
-            x = x[x <= threshold]
-            if prev_th is not None and threshold == prev_th:
+    def iterative_threshold(self, peakVal, alpha=0.01, n_iterations=16):
+        """
+        CORRECTED: Implements MATLAB iterative threshold calculation
+        Returns detections matrix and final threshold value
+        """
+        detections = np.zeros((n_iterations, len(peakVal)))
+        kai = np.zeros(n_iterations)
+
+        # Create discrete distribution for threshold calculation
+        nMax = np.max(peakVal) * 3
+        nn = np.linspace(0, nMax, 3000)
+
+        for jj in range(n_iterations):
+            # Fit gamma distribution to remaining peaks
+            valid_peaks = peakVal[peakVal > 0]
+            if len(valid_peaks) == 0:
                 break
-            prev_th = threshold
-        return threshold, shape, loc, scale
+
+            # MATLAB gamfit returns [shape, scale] with 2 params
+            shape, loc, scale = gamma.fit(valid_peaks, floc=0)
+
+            # Calculate CDF at discrete points
+            P = gamma.cdf(nn, shape, loc=loc, scale=scale)
+            cumulative = 1 - P
+
+            # Find threshold where cumulative < alpha
+            alpha_ind = np.where(cumulative < alpha)[0]
+            if len(alpha_ind) > 0:
+                kai[jj] = nn[np.min(alpha_ind)]
+            else:
+                kai[jj] = nMax
+
+            # Identify detections
+            detections[jj, :] = peakVal > kai[jj]
+
+            # Remove detected peaks for next iteration
+            peakVal[peakVal > kai[jj]] = 0
+
+        return detections, kai[-1], scale  # Return final threshold
 
 class FrauscherRipplesDetectionMethod(RipplesDetection):
     def __init__(self, hp_channel_section, fs, start_of_sections, verbose=True):
